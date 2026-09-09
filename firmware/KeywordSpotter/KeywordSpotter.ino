@@ -45,6 +45,18 @@ alignas(16) uint8_t g_tensor_arena[kTensorArenaSize];
 // the 256 KB total. It fits, but the headroom is smaller than a fresh build
 // suggests. If AllocateTensors() fails later, that ring buffer is the first
 // thing to shrink.
+//
+// The same dead-code elimination currently applies to g_model_data itself.
+// g_model is written once below and never read (everything after it is still
+// TODO), and it has internal linkage (anonymous namespace), so the compiler
+// can prove -- correctly -- that the write is unobservable and strips the
+// whole call, taking the 48 KB model array with it. Verified directly: flash
+// usage today is identical with the real quantized model in model_data.cc and
+// with a 4-byte placeholder in its place; adding one line that reads
+// g_model->version() makes flash usage jump by exactly the model's size.
+// Nothing is wrong with model_data.cc -- this firmware just doesn't use the
+// model yet. Once AllocateTensors()/Invoke() are implemented and g_model is
+// genuinely read, the "9%" flash figure a fresh build reports will jump too.
 
 int32_t g_previous_time_ms = 0;
 bool g_was_settling = true;
