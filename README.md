@@ -44,6 +44,21 @@ Recording runs **through the Nano**, not the host mic: flash
 board over USB serial and writes the clips it returns. This keeps the training
 set on the same microphone that will run inference.
 
+**`train.py` and `quantize.py` need TensorFlow, which has no wheel for Python
+3.14 as of this writing.** Use Python 3.11 or 3.12 for those two steps (a
+dedicated conda env works well: `conda create -n keywordspotter python=3.11`,
+then `pip install -r requirements.txt` inside it). `record_samples.py` and
+`extract_features.py` don't need TensorFlow and run fine under 3.14.
+
+`train.py`'s `BatchNormalization` layers use a non-default momentum
+(`config.BN_MOMENTUM = 0.7`, not Keras's default 0.99) -- with a training set
+this size there are only ~7 optimizer steps per epoch, nowhere near enough for
+the default momentum's moving average to converge. Verified empirically: the
+default value trains to ~100% train accuracy while val accuracy stays frozen
+at exactly the background-class fraction, because `predict()` uses the
+still-unconverged moving average. See the comment in `config.py` next to
+`BN_MOMENTUM` before changing it.
+
 ## Firmware
 
 Open `firmware/KeywordSpotter/KeywordSpotter.ino` in the Arduino IDE, set the

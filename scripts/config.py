@@ -21,6 +21,12 @@ FIRMWARE_DIR = REPO_ROOT / "firmware" / "KeywordSpotter"
 
 CHECKPOINT_PATH = CHECKPOINT_DIR / "ds_cnn_best.h5"
 TFLITE_PATH = TFLITE_DIR / "ds_cnn_int8.tflite"
+# Per-MFCC-coefficient mean/std from the train split, computed by train.py.
+# quantize.py applies the same normalization to its representative dataset,
+# and must also bake these constants into model_settings.h -- feature_provider
+# has to apply identical normalization on-device, or the model sees
+# differently-scaled input at inference than it was trained on.
+NORMALIZATION_PATH = CHECKPOINT_DIR / "normalization.npz"
 
 # --- Classes -------------------------------------------------------------
 # Order matters: the index of a label here is the index the model emits and
@@ -89,11 +95,62 @@ RANDOM_SEED = 1337
 BATCH_SIZE = 64
 EPOCHS = 60
 LEARNING_RATE = 1e-3
+EARLY_STOPPING_PATIENCE = 15  # epochs of no val_accuracy gain before stopping
 
-# DS-CNN topology: one standard conv, then N depthwise-separable blocks.
+# DS-CNN topology: one standard conv, then N depthwise-separable blocks, then
+# average-pool + dense + softmax. This is the "Hello Edge" DS-CNN shape (Zhang
+# et al.) sized for exactly this FEATURE_SHAPE input -- a stem kernel wide in
+# the time axis (frames carry more discriminative structure than individual
+# MFCC bins), stride-2 stem to cut the sequence down once, then stride-1
+# depthwise-separable blocks that don't shrink it further.
+#
+# Every layer maps to one op TFLM must register (see the resolver TODO in
+# KeywordSpotter.ino): Conv2D/DepthwiseConv2D -> CONV_2D/DEPTHWISE_CONV_2D,
+# BatchNorm+ReLU fuse into the preceding conv at TFLite-conversion time (no
+# runtime op of their own), AveragePooling2D over the full remaining spatial
+# extent -> AVERAGE_POOL_2D (deliberately not GlobalAveragePooling2D, which
+# can lower to a MEAN op instead -- not in that resolver list), Flatten ->
+# RESHAPE, Dense -> FULLY_CONNECTED, softmax -> SOFTMAX.
 DS_CNN_FILTERS = 64
 DS_CNN_BLOCKS = 4
+DS_CNN_STEM_KERNEL = (10, 4)
+DS_CNN_STEM_STRIDE = (2, 2)
+DS_CNN_BLOCK_KERNEL = (3, 3)
 DROPOUT = 0.2
+WEIGHT_DECAY = 1e-4  # L2 on conv/dense kernels; pure training-time cost, no
+                      # runtime op added to the converted graph
+
+# BatchNormalization's moving-average momentum. Keras's default (0.99) is
+# tuned for large-batch, many-step training; at BATCH_SIZE=64 over ~400-500
+# training clips there are only ~7 optimizer steps per epoch, nowhere near
+# enough for a momentum-0.99 moving average to converge within EPOCHS. The
+# symptom, verified empirically on this dataset: train accuracy climbs to
+# ~100% (real batch statistics, train-mode) while val accuracy sits frozen at
+# exactly the background-class fraction with near-uniform softmax output --
+# predict() uses the still-unconverged moving average and produces near-noise
+# on every input. 0.7 fixed it completely (0.53 -> 0.98 val accuracy on the
+# same run, matching a plain LogisticRegression baseline on these features).
+# Revisit upward only if the training set grows enough to give many more
+# steps per epoch.
+BN_MOMENTUM = 0.7
+
+# --- Data augmentation -----------------------------------------------------
+# Applied to TRAINING clips only, freshly randomized every epoch via a
+# tf.data pipeline -- never to val/test. At ~50-60 clips per keyword,
+# recorded in one or two sittings each, the model has almost no genuine
+# variation to learn invariance from; without this, train.py reaches 100%
+# train accuracy while val accuracy sits at chance (verified empirically:
+# it did, before these were added). All are applied to already-normalized
+# features, so magnitudes are in standard-deviation units.
+AUGMENT_TIME_SHIFT_FRAMES = 4    # max frames to shift the clip earlier/later,
+                                  # zero-padding the gap -- robustness to
+                                  # where in the 1s capture window the word
+                                  # actually landed
+AUGMENT_TIME_MASK_FRAMES = 8     # SpecAugment-style: zero a random
+                                  # contiguous block of frames (of this max
+                                  # length) each epoch
+AUGMENT_FREQ_MASK_BINS = 2       # same idea, across MFCC coefficients
+AUGMENT_NOISE_STD = 0.1          # additive Gaussian noise, in normalized units
 
 # --- Inference / firmware ------------------------------------------------
 DETECTION_THRESHOLD = 0.80   # softmax score needed to fire the action
