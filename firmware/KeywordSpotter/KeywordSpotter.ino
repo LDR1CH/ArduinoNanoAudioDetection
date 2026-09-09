@@ -65,12 +65,29 @@ int32_t g_previous_time_ms = 0;
 bool g_was_settling = true;
 
 // Detection smoothing: require the argmax category to be stable across
-// kSmoothingWindow consecutive inferences (~60ms at one new frame per ~20ms)
-// before treating it as a real detection, not single-frame noise. Resets
-// once the category returns to background, so the same word can fire again
-// on a later utterance.
-constexpr int kSmoothingWindow = 3;
-int g_recent_categories[kSmoothingWindow] = {0, 0, 0};  // kBackgroundIndex
+// kSmoothingWindow consecutive inferences before treating it as a real
+// detection. Resets once the category returns to background, so the same word
+// can fire again on a later utterance.
+//
+// Set to 1 (no cross-inference agreement required) on MEASURED throughput,
+// not on the rate this was originally designed against. The heartbeat's
+// avg_invoke_us/avg_feat_us report ~225 ms per Invoke() plus ~228 ms of
+// feature work, i.e. ~2.2 inferences/second -- not the ~50/second implied by
+// one inference per kWindowStrideMs. At that real rate a window of 3 spans
+// ~1.4 s of wall time, but a spoken word only sits inside the 49-frame (~1 s)
+// sliding window for about a second, so 3 consecutive agreeing inferences was
+// unsatisfiable: it rejected 100% of candidates, including ones scoring 0.98.
+//
+// Requiring agreement is also far less necessary at this rate than at 50/s.
+// Each inference already integrates a full ~1 s window, so one result is a
+// considered judgement over lots of audio rather than a single noisy frame --
+// which is what the original window existed to smooth out. kDetectionThreshold
+// carries the rejection load instead.
+//
+// Raise this again if Invoke() ever gets materially faster (CMSIS-NN kernels
+// would be the lever), and re-check the heartbeat numbers when you do.
+constexpr int kSmoothingWindow = 1;
+int g_recent_categories[kSmoothingWindow] = {0};  // kBackgroundIndex
 int g_recent_write_pos = 0;
 int g_last_responded_category = 0;  // kBackgroundIndex
 
@@ -150,6 +167,15 @@ void setup() {
 namespace {
 int32_t g_last_heartbeat_ms = 0;
 constexpr int32_t kHeartbeatIntervalMs = 2000;
+
+// Throughput instrumentation, reported with each heartbeat and then reset.
+// The detection gates downstream depend on how FAST inference actually runs,
+// not on how fast it was assumed to run -- kSmoothingWindow consecutive
+// agreeing inferences means something entirely different at 50/s than at 2/s.
+// Measured, not estimated.
+uint32_t g_infer_count = 0;
+uint32_t g_feat_us_total = 0;
+uint32_t g_invoke_us_total = 0;
 }  // namespace
 
 void loop() {
@@ -161,7 +187,16 @@ void loop() {
   if (current_time_ms - g_last_heartbeat_ms >= kHeartbeatIntervalMs) {
     g_last_heartbeat_ms = current_time_ms;
     Serial.print("heartbeat t=");
-    Serial.println(current_time_ms);
+    Serial.print(current_time_ms);
+    Serial.print(" infers=");
+    Serial.print(g_infer_count);
+    Serial.print(" avg_feat_us=");
+    Serial.print(g_infer_count ? g_feat_us_total / g_infer_count : 0);
+    Serial.print(" avg_invoke_us=");
+    Serial.println(g_infer_count ? g_invoke_us_total / g_infer_count : 0);
+    g_infer_count = 0;
+    g_feat_us_total = 0;
+    g_invoke_us_total = 0;
   }
 
   // The mic needs a few seconds after reset before its data means anything.
@@ -177,9 +212,12 @@ void loop() {
   UpdateStatus(current_time_ms);
 
   int slices_needed = 0;
-  if (!PopulateFeatures(g_previous_time_ms, current_time_ms,
-                        g_input ? g_input->data.int8 : nullptr,
-                        &slices_needed)) {
+  const uint32_t feat_start_us = micros();
+  const bool have_features =
+      PopulateFeatures(g_previous_time_ms, current_time_ms,
+                       g_input ? g_input->data.int8 : nullptr, &slices_needed);
+  const uint32_t feat_us = micros() - feat_start_us;
+  if (!have_features) {
     return;
   }
   g_previous_time_ms = current_time_ms;
@@ -187,9 +225,13 @@ void loop() {
     return;  // nothing new to classify yet
   }
 
+  const uint32_t invoke_start_us = micros();
   if (g_interpreter->Invoke() != kTfLiteOk) {
     return;  // transient failure; try again next loop iteration
   }
+  g_invoke_us_total += micros() - invoke_start_us;
+  g_feat_us_total += feat_us;
+  g_infer_count++;
 
   // Dequantize: real_value = (int8_value - zero_point) * scale.
   int category = kBackgroundIndex;
@@ -213,8 +255,8 @@ void loop() {
     // ever trigger the action once.
     g_last_responded_category = kBackgroundIndex;
   } else if (best_score >= kDetectionThreshold &&
-            RecentCategoriesAllMatch(category) &&
-            category != g_last_responded_category) {
+             RecentCategoriesAllMatch(category) &&
+             category != g_last_responded_category) {
     is_new_command = true;
     g_last_responded_category = category;
   }

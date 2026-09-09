@@ -60,7 +60,7 @@ extern const char* kCategoryLabels[kCategoryCount];
 // Softmax score (0..1, after dequantizing the int8 output with its own
 // scale/zero-point -- read those off the output tensor at init time, don't
 // hardcode them here) required before command_responder fires the action.
-constexpr float kDetectionThreshold = 0.8f;
+constexpr float kDetectionThreshold = 0.55f;
 
 // Scratch memory for the TFLM interpreter. Bump if AllocateTensors() fails;
 // shrink if the sketch runs out of RAM.

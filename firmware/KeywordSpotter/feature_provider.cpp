@@ -192,12 +192,31 @@ bool PopulateFeatures(int32_t last_time_ms, int32_t end_time_ms,
     }
     return false;  // window not fully populated yet (e.g. just after boot)
   }
-  if (new_frames > kFeatureFrames) {
-    new_frames = kFeatureFrames;  // cap: a full window refresh either way
+  int32_t target_end_ms;
+  if (new_frames >= kFeatureFrames) {
+    // Too far behind to walk forward incrementally: every frame between the
+    // anchor and now would have to be computed, and the audio for the oldest
+    // of them has already been overwritten in audio_provider's ring buffer.
+    // Re-anchor to the newest frame boundary at or before end_time_ms and
+    // refill the whole window from there.
+    //
+    // This is not a rare edge case -- it is guaranteed on the FIRST call
+    // after the mic settle window, when the anchor is still 0 but ~4 s of
+    // audio has already streamed past. Advancing by kWindowStrideMs from the
+    // stale anchor instead (the obvious-looking cap) asks for audio ending at
+    // 980 ms that the ring buffer no longer holds; GetAudioSamples rightly
+    // refuses, the anchor never advances, and the request repeats forever --
+    // a permanent deadlock in which the board heartbeats normally and never
+    // runs a single inference.
+    new_frames = kFeatureFrames;
+    target_end_ms = (end_time_ms / kWindowStrideMs) * kWindowStrideMs;
+    g_frames_valid = 0;
+  } else {
+    // Normal incremental case: advance by exact kWindowStrideMs multiples so
+    // frame boundaries stay locked to the same grid extract_features.py uses.
+    target_end_ms =
+        g_newest_frame_end_time_ms + (int32_t)new_frames * kWindowStrideMs;
   }
-
-  const int32_t target_end_ms =
-      g_newest_frame_end_time_ms + (int32_t)new_frames * kWindowStrideMs;
   const int needed_samples =
       (new_frames - 1) * kWindowStrideSamples + kWindowSizeSamples;
 

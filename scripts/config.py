@@ -206,5 +206,21 @@ AUGMENT_FREQ_MASK_BINS = 2       # same idea, across MFCC coefficients
 AUGMENT_NOISE_STD = 0.1          # additive Gaussian noise, in normalized units
 
 # --- Inference / firmware ------------------------------------------------
-DETECTION_THRESHOLD = 0.80   # softmax score needed to fire the action
+# Softmax score needed to fire the action. Calibrated against the board, not
+# against validation accuracy -- the two disagree sharply and validation is the
+# misleading one here.
+#
+# Validation clips score ~1.0 because each holds one word positioned the way it
+# was recorded. Live, feature_provider slides a 49-frame (~1 s) window forward
+# every WINDOW_STRIDE_MS, so most inferences see a PARTIAL word and score low.
+# Confidence spikes only at the moment the window happens to align with the
+# utterance. Measured on real speech at ~1 m, a correctly-classified keyword
+# runs 0.3-0.6 with a brief peak around 0.8 -- so 0.80 demanded near-perfect
+# alignment and the board never fired at all, despite every argmax being right.
+#
+# 0.55 clears the typical run of a real utterance rather than only its peak,
+# while staying far above the 0.20 chance level for CATEGORY_COUNT=5. Retune by
+# watching the "infer <label> @ <score>" serial lines: raise it if background
+# noise fires the action, lower it if clear speech doesn't.
+DETECTION_THRESHOLD = 0.55
 TENSOR_ARENA_SIZE = 30 * 1024  # bytes reserved for TFLM on the Nano
