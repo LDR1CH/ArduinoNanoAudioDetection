@@ -1,0 +1,9 @@
+# Training pipeline only. Nothing here is needed to build firmware/.
+numpy>=1.24
+scipy>=1.10
+pyserial>=3.5           # record_samples.py: clip capture over USB serial
+soundfile>=0.12         # WAV read/write
+librosa>=0.10           # MFCC extraction (extract_features.py)
+tensorflow>=2.15        # DS-CNN training + TFLite converter
+scikit-learn>=1.3       # train/val/test splits, confusion matrix
+matplotlib>=3.7         # training curves, confusion matrix plots

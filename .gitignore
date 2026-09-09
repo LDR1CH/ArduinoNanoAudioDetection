@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Training artifacts (regenerate via the pipeline)
+data/processed/*.npy
+data/processed/*.npz
+models/checkpoints/*.h5
+models/checkpoints/*.keras
+models/tflite/*.tflite
+results/*.png
+results/*.csv
+
+# Raw audio: not tracked. Reproducible via scripts/record_samples.py (needs
+# firmware/AudioCapture flashed) plus docs/test_sentences.md for the
+# background-noise sentence readings.
+data/raw/**/*.wav
+
+# Arduino / editors
+firmware/**/build/
+.vscode/
+.DS_Store
