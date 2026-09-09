@@ -80,12 +80,55 @@ SENTENCES_PATH = REPO_ROOT / "docs" / "test_sentences.md"
 # disagree about what "frame 0" even is.
 WINDOW_SIZE_MS = 40
 WINDOW_STRIDE_MS = 20
-WINDOW_SIZE_SAMPLES = SAMPLE_RATE * WINDOW_SIZE_MS // 1000
-WINDOW_STRIDE_SAMPLES = SAMPLE_RATE * WINDOW_STRIDE_MS // 1000
+WINDOW_SIZE_SAMPLES = SAMPLE_RATE * WINDOW_SIZE_MS // 1000    # 640
+WINDOW_STRIDE_SAMPLES = SAMPLE_RATE * WINDOW_STRIDE_MS // 1000  # 320
+# FFT length: a power of two, NOT WINDOW_SIZE_SAMPLES (640 -- not a power of
+# two, and a direct/mixed-radix transform at that size is both slow and hard
+# to hand-verify on the Cortex-M4F). The windowed 640-sample frame is
+# zero-padded to 1024 before the FFT, on both the Python and firmware side --
+# this only changes frequency-bin resolution, not the frame timing that
+# NUM_FRAMES depends on.
+N_FFT = 1024
 N_MELS = 40                  # mel filterbank channels before DCT truncation
 NUM_MFCC = 10                # coefficients kept after the DCT
 NUM_FRAMES = 1 + (CLIP_DURATION_MS - WINDOW_SIZE_MS) // WINDOW_STRIDE_MS  # 49
 FEATURE_SHAPE = (NUM_FRAMES, NUM_MFCC)
+
+# The exact MFCC recipe, verified against librosa's actual source (not just
+# its docs) because feature_provider.cpp has to reproduce every step of it on
+# the Nano bit-for-bit-close, and librosa.feature.mfcc()'s convenience
+# wrapper hides two conventions that are NOT safe to reproduce as-is:
+#
+# 1. Window: PERIODIC Hann (scipy sym=False), not the symmetric variant --
+#    w[n] = 0.5 - 0.5*cos(2*pi*n / WINDOW_SIZE_SAMPLES), n = 0..639.
+#    Verified: matches librosa.filters.get_window('hann', 640) to float
+#    precision (~1e-16). The symmetric variant differs by up to 0.0038 --
+#    small, but a needless, avoidable mismatch.
+#
+# 2. power_to_db's top_db=80.0 default clips every value to within top_db of
+#    log_spec.max() -- the max over the WHOLE ARRAY PASSED IN. Called once
+#    per whole clip (as librosa.feature.mfcc does), that max spans all 49
+#    frames at once: a fundamentally non-causal, whole-clip-dependent
+#    operation. feature_provider computes frames incrementally as audio
+#    streams in and cannot know a "whole clip max" -- worse, under streaming
+#    there often isn't a well-defined clip boundary at all. This project sets
+#    top_db=None (see extract_features.py's compute_mfcc, which calls
+#    melspectrogram + power_to_db + DCT directly rather than through
+#    feature.mfcc(), specifically to disable this). Every frame's log-power
+#    is then a pure function of that frame alone, which is what actually
+#    makes on-device reproduction possible.
+#
+# Everything else matches librosa.feature.mfcc's defaults directly: mel
+# filterbank Slaney-normalized (mel_norm='slaney', htk=False), power
+# spectrogram (power=2.0), ref=1.0/amin=1e-10 in power_to_db, DCT-II with
+# norm='ortho' (verified against a from-scratch formula to ~1e-14).
+#
+# The mel filterbank itself (librosa.filters.mel(...)) is exported by
+# quantize.py as a constant matrix into model_settings.h/.cc --
+# feature_provider does a matrix-multiply against those weights rather than
+# reconstructing Slaney-normalized triangular filters on-device, so the one
+# part of this recipe with real per-filter arithmetic subtlety is exactly the
+# librosa-computed values, not a hand reimplementation of them.
 
 # --- Training ------------------------------------------------------------
 VAL_SPLIT = 0.10
@@ -104,13 +147,23 @@ EARLY_STOPPING_PATIENCE = 15  # epochs of no val_accuracy gain before stopping
 # MFCC bins), stride-2 stem to cut the sequence down once, then stride-1
 # depthwise-separable blocks that don't shrink it further.
 #
-# Every layer maps to one op TFLM must register (see the resolver TODO in
-# KeywordSpotter.ino): Conv2D/DepthwiseConv2D -> CONV_2D/DEPTHWISE_CONV_2D,
-# BatchNorm+ReLU fuse into the preceding conv at TFLite-conversion time (no
-# runtime op of their own), AveragePooling2D over the full remaining spatial
-# extent -> AVERAGE_POOL_2D (deliberately not GlobalAveragePooling2D, which
-# can lower to a MEAN op instead -- not in that resolver list), Flatten ->
-# RESHAPE, Dense -> FULLY_CONNECTED, softmax -> SOFTMAX.
+# Op mapping, registered in KeywordSpotter.ino's resolver: Conv2D/
+# DepthwiseConv2D -> CONV_2D/DEPTHWISE_CONV_2D, BatchNorm+ReLU fuse into the
+# preceding conv at TFLite-conversion time (no runtime op of their own),
+# AveragePooling2D over the full remaining spatial extent -> AVERAGE_POOL_2D
+# (deliberately not GlobalAveragePooling2D, which can lower to a MEAN op
+# instead), Dense -> FULLY_CONNECTED, softmax -> SOFTMAX.
+#
+# Flatten does NOT map to a single RESHAPE as its name suggests -- confirmed
+# the hard way, on real hardware. With a symbolic batch dimension, Keras's
+# Flatten() lowered to SHAPE + STRIDED_SLICE + PACK + RESHAPE (computing the
+# flattened size at graph-run time), not the plain static RESHAPE a "one op
+# per layer" assumption predicts. Registering a resolver against only the
+# "obviously needed" 6 ops compiled fine and then silently hung on the board
+# at AllocateTensors() ("Didn't find op for builtin opcode 'SHAPE'"), with no
+# other symptom -- exactly the kind of assumption this project verifies
+# instead of trusting elsewhere. KeywordSpotter.ino's resolver comment has
+# the full 9-op list and how to re-derive it if this model changes.
 DS_CNN_FILTERS = 64
 DS_CNN_BLOCKS = 4
 DS_CNN_STEM_KERNEL = (10, 4)

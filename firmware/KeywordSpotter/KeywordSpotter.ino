@@ -34,32 +34,66 @@ namespace {
 const tflite::Model* g_model = nullptr;
 tflite::MicroInterpreter* g_interpreter = nullptr;
 TfLiteTensor* g_input = nullptr;
+TfLiteTensor* g_output = nullptr;
 
 alignas(16) uint8_t g_tensor_arena[kTensorArenaSize];
 
-// Note on RAM: while the interpreter below is still a TODO, nothing references
-// this arena (or audio_provider's ring buffer), so the linker discards them and
-// the compiler's "global variables use N bytes" figure is optimistic. Once the
-// stubs are implemented, expect roughly 30 KB for the arena plus 64 KB for the
-// 2-second audio ring buffer on top of the reported figure -- about 140 KB of
-// the 256 KB total. It fits, but the headroom is smaller than a fresh build
-// suggests. If AllocateTensors() fails later, that ring buffer is the first
-// thing to shrink.
+// The 9 ops this exact model actually uses -- read directly off
+// models/tflite/ds_cnn_int8.tflite's flatbuffer, not assumed from the Keras
+// architecture. The obvious guess (conv2d, depthwise_conv2d,
+// fully_connected, softmax, reshape, average_pool_2d -- one op per Keras
+// layer) was WRONG and cost a debugging session: Keras's Flatten(), with a
+// symbolic batch dimension, doesn't always lower to a single static RESHAPE.
+// Here it lowered to SHAPE + STRIDED_SLICE + PACK + RESHAPE, computing the
+// flattened size at graph-run time instead of baking it in. Confirmed by
+// the board itself: registering only the 6 "obvious" ops produced "Didn't
+// find op for builtin opcode 'SHAPE'" at AllocateTensors() and silently
+// hung with no other output (a MicroInterpreter op-resolution failure
+// doesn't halt cleanly the way this file's own Halt() does).
 //
-// The same dead-code elimination currently applies to g_model_data itself.
-// g_model is written once below and never read (everything after it is still
-// TODO), and it has internal linkage (anonymous namespace), so the compiler
-// can prove -- correctly -- that the write is unobservable and strips the
-// whole call, taking the 48 KB model array with it. Verified directly: flash
-// usage today is identical with the real quantized model in model_data.cc and
-// with a 4-byte placeholder in its place; adding one line that reads
-// g_model->version() makes flash usage jump by exactly the model's size.
-// Nothing is wrong with model_data.cc -- this firmware just doesn't use the
-// model yet. Once AllocateTensors()/Invoke() are implemented and g_model is
-// genuinely read, the "9%" flash figure a fresh build reports will jump too.
+// If you retrain and requantize, re-verify this list rather than trusting
+// it still holds -- e.g. in Python:
+//   interp = tf.lite.Interpreter(model_path="models/tflite/ds_cnn_int8.tflite")
+//   interp.allocate_tensors()  # then inspect the flatbuffer's operator codes
+//
+// A MicroMutableOpResolver registering only ops actually present keeps flash
+// cost down versus AllOpsResolver, which pulls in every kernel TFLM knows
+// about whether this model uses it or not.
+tflite::MicroMutableOpResolver<9> g_resolver;
 
 int32_t g_previous_time_ms = 0;
 bool g_was_settling = true;
+
+// Detection smoothing: require the argmax category to be stable across
+// kSmoothingWindow consecutive inferences (~60ms at one new frame per ~20ms)
+// before treating it as a real detection, not single-frame noise. Resets
+// once the category returns to background, so the same word can fire again
+// on a later utterance.
+constexpr int kSmoothingWindow = 3;
+int g_recent_categories[kSmoothingWindow] = {0, 0, 0};  // kBackgroundIndex
+int g_recent_write_pos = 0;
+int g_last_responded_category = 0;  // kBackgroundIndex
+
+bool RecentCategoriesAllMatch(int category) {
+  for (int i = 0; i < kSmoothingWindow; i++) {
+    if (g_recent_categories[i] != category) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Halts here -- there is no recovery path for a model/interpreter that
+// failed to set up, and continuing would mean running inference against
+// tensors that were never allocated. Matches the fail-loud convention
+// already used elsewhere in this project (e.g. firmware/AudioCapture on a
+// PDM.begin() failure) rather than silently limping on.
+void Halt(const char* message) {
+  Serial.print("FATAL: ");
+  Serial.println(message);
+  while (true) {
+  }
+}
 
 }  // namespace
 
@@ -68,25 +102,67 @@ void setup() {
   tflite::InitializeTarget();
 
   g_model = tflite::GetModel(g_model_data);
-  // TODO: check g_model->version() against TFLITE_SCHEMA_VERSION and halt on
-  // mismatch rather than running a model the interpreter cannot parse.
+  if (g_model->version() != TFLITE_SCHEMA_VERSION) {
+    Halt("model schema version mismatch -- regenerate model_data.cc");
+  }
 
-  // TODO: register only the ops the DS-CNN actually uses (conv2d,
-  // depthwise_conv2d, fully_connected, softmax, reshape, average_pool_2d) --
-  // a MicroMutableOpResolver keeps the flash cost down versus AllOpsResolver.
+  if (g_resolver.AddConv2D() != kTfLiteOk ||
+      g_resolver.AddDepthwiseConv2D() != kTfLiteOk ||
+      g_resolver.AddAveragePool2D() != kTfLiteOk ||
+      g_resolver.AddShape() != kTfLiteOk ||
+      g_resolver.AddStridedSlice() != kTfLiteOk ||
+      g_resolver.AddPack() != kTfLiteOk ||
+      g_resolver.AddReshape() != kTfLiteOk ||
+      g_resolver.AddFullyConnected() != kTfLiteOk ||
+      g_resolver.AddSoftmax() != kTfLiteOk) {
+    Halt("op resolver registration failed");
+  }
 
-  // TODO: construct the MicroInterpreter over g_tensor_arena, call
-  // AllocateTensors(), and cache g_interpreter->input(0) in g_input.
+  // Static, not stack-local: MicroInterpreter's lifetime must outlive setup()
+  // (loop() uses g_interpreter every iteration), and it's too large for a
+  // comfortable stack frame regardless.
+  static tflite::MicroInterpreter static_interpreter(
+      g_model, g_resolver, g_tensor_arena, kTensorArenaSize);
+  g_interpreter = &static_interpreter;
+
+  if (g_interpreter->AllocateTensors() != kTfLiteOk) {
+    Halt("AllocateTensors failed -- try shrinking kTensorArenaSize's "
+        "companion buffers, or grow the arena if there's headroom");
+  }
+
+  g_input = g_interpreter->input(0);
+  g_output = g_interpreter->output(0);
+
+  // The model's actual int8 scale/zero-point -- read from the tensor, never
+  // hardcoded, since a retrained model can pick different quantization
+  // parameters even with an identical architecture. feature_provider needs
+  // these to quantize its MFCC output to match what this model expects.
+  FeatureProviderSetQuantization(g_input->params.scale,
+                                 g_input->params.zero_point);
 
   if (!AudioProviderInit() || !FeatureProviderInit() ||
       !CommandResponderInit()) {
-    Serial.println("init failed");
+    Halt("audio/feature/command provider init failed");
   }
   SetStatus(SpotterStatus::kSettling);
 }
 
+namespace {
+int32_t g_last_heartbeat_ms = 0;
+constexpr int32_t kHeartbeatIntervalMs = 2000;
+}  // namespace
+
 void loop() {
   const int32_t current_time_ms = LatestAudioTimestamp();
+
+  // A silent device and a hung one look identical from outside. This costs
+  // one print every 2s and settles that ambiguity at a glance, including
+  // for whoever is debugging this on a desk months from now.
+  if (current_time_ms - g_last_heartbeat_ms >= kHeartbeatIntervalMs) {
+    g_last_heartbeat_ms = current_time_ms;
+    Serial.print("heartbeat t=");
+    Serial.println(current_time_ms);
+  }
 
   // The mic needs a few seconds after reset before its data means anything.
   if (!AudioProviderReady()) {
@@ -111,12 +187,37 @@ void loop() {
     return;  // nothing new to classify yet
   }
 
-  // TODO: g_interpreter->Invoke(), then dequantize output(0) with its
-  // scale/zero_point, take the argmax, and smooth across a few consecutive
-  // windows before treating it as a detection.
-  const int category = kBackgroundIndex;
-  const float score = 0.0f;
-  const bool is_new_command = false;
+  if (g_interpreter->Invoke() != kTfLiteOk) {
+    return;  // transient failure; try again next loop iteration
+  }
 
-  RespondToCommand(current_time_ms, category, score, is_new_command);
+  // Dequantize: real_value = (int8_value - zero_point) * scale.
+  int category = kBackgroundIndex;
+  float best_score = -1.0f;
+  for (int i = 0; i < kCategoryCount; i++) {
+    const float score = (g_output->data.int8[i] - g_output->params.zero_point) *
+                        g_output->params.scale;
+    if (score > best_score) {
+      best_score = score;
+      category = i;
+    }
+  }
+
+  g_recent_categories[g_recent_write_pos] = category;
+  g_recent_write_pos = (g_recent_write_pos + 1) % kSmoothingWindow;
+
+  bool is_new_command = false;
+  if (category == kBackgroundIndex) {
+    // Once background returns, the next confident keyword is free to fire
+    // again -- without this, saying the same word twice in a row would only
+    // ever trigger the action once.
+    g_last_responded_category = kBackgroundIndex;
+  } else if (best_score >= kDetectionThreshold &&
+            RecentCategoriesAllMatch(category) &&
+            category != g_last_responded_category) {
+    is_new_command = true;
+    g_last_responded_category = category;
+  }
+
+  RespondToCommand(current_time_ms, category, best_score, is_new_command);
 }

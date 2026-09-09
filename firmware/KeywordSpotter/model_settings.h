@@ -17,11 +17,31 @@ constexpr int kClipDurationMs = 1000;
 constexpr int kClipSamples = kAudioSampleRate * kClipDurationMs / 1000;
 
 // --- MFCC features (feature_provider) ------------------------------------
+// Recipe is documented in full in scripts/config.py next to N_FFT -- window
+// convention, why n_fft != window size, and why top_db-based dynamic range
+// clipping is deliberately NOT part of this (it isn't reproducible frame by
+// frame). Read that before changing anything here.
 constexpr int kWindowSizeMs = 40;
 constexpr int kWindowStrideMs = 20;
+constexpr int kWindowSizeSamples = 640;
+constexpr int kWindowStrideSamples = 320;
+constexpr int kFftSize = 1024;             // zero-padded FFT length
+constexpr int kSpectrumBins = kFftSize / 2 + 1;  // real FFT output length
 constexpr int kFeatureFrames = 49;
+constexpr int kNumMels = 40;
 constexpr int kFeatureCount = 10;
 constexpr int kFeatureElements = kFeatureFrames * kFeatureCount;
+
+// Slaney-normalized mel filterbank (librosa.filters.mel), kNumMels x
+// kSpectrumBins, row-major. feature_provider does a plain matrix-vector
+// multiply (this matrix times the frame's power spectrum) rather than
+// reconstructing triangular filter shapes/normalization on-device -- the one
+// piece of this recipe with real per-filter arithmetic subtlety is exactly
+// these librosa-computed weights, not a hand reimplementation of them.
+// ~80 KB in flash, dense
+// (only ~5% of entries are nonzero -- a sparse encoding would shrink this a
+// lot if flash ever gets tight, but there's no need for it yet).
+extern const float kMelFilterbank[kNumMels * kSpectrumBins];
 
 // Per-MFCC-coefficient normalization, fit on the training split by
 // train.py and applied identically here: feature_provider must subtract

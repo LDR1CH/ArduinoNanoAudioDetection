@@ -25,6 +25,7 @@ import json
 
 import librosa
 import numpy as np
+import scipy.fft
 import soundfile as sf
 from sklearn.model_selection import StratifiedGroupKFold
 
@@ -60,26 +61,73 @@ def load_clip(path):
     return samples
 
 
+# Precomputed once at import time, not per call/per frame:
+#
+# _HANN_WINDOW: periodic Hann (0.5 - 0.5*cos(2*pi*n/N), NOT the symmetric
+# variant) -- verified against librosa.filters.get_window('hann', N) to
+# float precision. feature_provider.cpp computes the identical closed form
+# on-device rather than reproducing this table, so there's nothing to export.
+#
+# _MEL_FILTERBANK: librosa's own Slaney-normalized mel filters, shape
+# (N_MELS, N_FFT//2+1). This is the one piece of real per-filter arithmetic
+# subtlety in the whole recipe (triangular filter shapes, Slaney area
+# normalization), so rather than reimplement it on-device, quantize.py
+# exports these exact weights into model_settings.h/.cc as a constant
+# matrix -- feature_provider does a plain matrix-vector multiply against
+# librosa-computed values, not a hand reimplementation of them.
+_HANN_WINDOW = (
+    0.5 - 0.5 * np.cos(2 * np.pi * np.arange(config.WINDOW_SIZE_SAMPLES)
+                       / config.WINDOW_SIZE_SAMPLES)
+).astype(np.float32)
+_MEL_FILTERBANK = librosa.filters.mel(
+    sr=config.SAMPLE_RATE, n_fft=config.N_FFT, n_mels=config.N_MELS,
+    norm="slaney").astype(np.float32)
+
+
+def compute_frame_mfcc(frame_samples):
+    """MFCC coefficients for ONE frame -- exactly WINDOW_SIZE_SAMPLES raw
+    audio samples in, NUM_MFCC values out. A pure function of this frame
+    alone, nothing else -- this is intentional (see compute_mfcc) and it's
+    exactly what feature_provider.cpp computes per frame on-device: window,
+    zero-pad, FFT, power spectrum, mel filterbank matmul, log, DCT.
+
+    Deliberately not routed through librosa.feature.mfcc()/melspectrogram()
+    at all (not even per-frame): those batch over an entire y=... time
+    series internally, and verified empirically that n_fft > win_length
+    changes librosa's own frame COUNT even with center=False (49 -> 47 in
+    testing) -- an undocumented-to-us internal behavior not worth depending
+    on. Framing is instead done explicitly by the caller (see compute_mfcc),
+    and this function only ever sees one already-extracted frame.
+    """
+    windowed = frame_samples * _HANN_WINDOW
+    padded = np.zeros(config.N_FFT, dtype=np.float32)
+    padded[:config.WINDOW_SIZE_SAMPLES] = windowed
+
+    spectrum = np.fft.rfft(padded)
+    power = spectrum.real ** 2 + spectrum.imag ** 2  # power=2.0, ref=1.0
+
+    mel_energy = _MEL_FILTERBANK @ power
+    log_mel = 10.0 * np.log10(np.maximum(1e-10, mel_energy))  # power_to_db,
+                                                                # top_db=None
+
+    return scipy.fft.dct(log_mel, type=2, norm="ortho")[:config.NUM_MFCC]
+
+
 def compute_mfcc(samples):
     """Return a (NUM_FRAMES, NUM_MFCC) MFCC array for one clip.
 
-    center=False and n_fft == win_length keep framing exact (see the note by
-    WINDOW_SIZE_SAMPLES in config.py): frame i is samples
-    [i*stride : i*stride+win_length], no reflect-padding at the edges, no
-    zero-padding inside the FFT.
+    Framing: frame i is samples[i*stride : i*stride+win_length], no
+    reflect-padding at the clip edges (i.e. what librosa calls
+    center=False) -- explicit here rather than delegated to a library, see
+    compute_frame_mfcc for why.
     """
-    mfcc = librosa.feature.mfcc(
-        y=samples,
-        sr=config.SAMPLE_RATE,
-        n_mfcc=config.NUM_MFCC,
-        n_mels=config.N_MELS,
-        n_fft=config.WINDOW_SIZE_SAMPLES,
-        win_length=config.WINDOW_SIZE_SAMPLES,
-        hop_length=config.WINDOW_STRIDE_SAMPLES,
-        window="hann",
-        center=False,
-    )
-    mfcc = mfcc.T.astype(np.float32)  # librosa returns (n_mfcc, frames)
+    frames = []
+    for i in range(config.NUM_FRAMES):
+        start = i * config.WINDOW_STRIDE_SAMPLES
+        frame = samples[start:start + config.WINDOW_SIZE_SAMPLES]
+        frames.append(compute_frame_mfcc(frame))
+
+    mfcc = np.stack(frames).astype(np.float32)  # (NUM_FRAMES, NUM_MFCC)
 
     if mfcc.shape != config.FEATURE_SHAPE:
         raise RuntimeError(
