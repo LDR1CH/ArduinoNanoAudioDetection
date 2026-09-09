@@ -8,6 +8,7 @@ venv/
 # Training artifacts (regenerate via the pipeline)
 data/processed/*.npy
 data/processed/*.npz
+data/processed/*_files.txt
 models/checkpoints/*.h5
 models/checkpoints/*.keras
 models/tflite/*.tflite
@@ -16,8 +17,11 @@ results/*.csv
 
 # Raw audio: not tracked. Reproducible via scripts/record_samples.py (needs
 # firmware/AudioCapture flashed) plus docs/test_sentences.md for the
-# background-noise sentence readings.
+# background-noise sentence readings. _groups.json is metadata about those
+# same untracked clips (which sentence-slice windows belong together) and is
+# regenerated alongside them by the same command, so it follows suit.
 data/raw/**/*.wav
+data/raw/**/_groups.json
 
 # Arduino / editors
 firmware/**/build/

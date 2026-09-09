@@ -22,6 +22,7 @@ up rather than overwriting it. Ctrl-C stops cleanly.
 """
 
 import argparse
+import json
 import sys
 import time
 
@@ -239,12 +240,36 @@ def load_sentences(path=None):
     return sentences
 
 
+def load_groups(label_dir):
+    """Load the sentence-group sidecar, or {} if this is the first run."""
+    path = label_dir / config.BACKGROUND_GROUPS_FILENAME
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def save_groups(label_dir, groups):
+    path = label_dir / config.BACKGROUND_GROUPS_FILENAME
+    path.write_text(json.dumps(groups, indent=2, sort_keys=True),
+                     encoding="utf-8")
+
+
+def next_group_id(groups):
+    """Next unused "sentence:N" id, continuing across previous runs."""
+    used = [int(v.split(":")[1]) for v in groups.values()
+            if v.startswith("sentence:")]
+    return max(used, default=-1) + 1
+
+
 def record_background_sentences(board, sentences_path=None):
     """Read whole sentences aloud for the _background_noise class.
 
     Each SENTENCE_DURATION_MS reading is sliced into several CLIP_SAMPLES
     windows (see slice_windows), so this yields multiple training clips per
-    sentence spoken.
+    sentence spoken. Every window from one reading shares a group id, written
+    to _groups.json -- extract_features.py keeps a group together on one side
+    of the train/val/test split, since overlapping windows share most of
+    their audio and splitting them apart would leak.
     """
     label = config.BACKGROUND_LABEL
     label_dir = config.RAW_DIR / label
@@ -255,6 +280,8 @@ def record_background_sentences(board, sentences_path=None):
         (config.SENTENCE_SAMPLES - config.CLIP_SAMPLES)
         // config.SLICE_STRIDE_SAMPLES)
     index = next_index(label_dir, label)
+    groups = load_groups(label_dir)
+    group_id = next_group_id(groups)
 
     print(f"--- {label}: {len(sentences)} sentences, "
           f"~{windows_per_sentence} clips each "
@@ -273,10 +300,15 @@ def record_background_sentences(board, sentences_path=None):
 
         samples = record_long_clip(board)
         windows = slice_windows(samples)
+        gid = f"sentence:{group_id}"
+        group_id += 1
         for window in windows:
-            path = label_dir / f"{label}_{index:03d}.wav"
-            sf.write(path, window, config.SAMPLE_RATE, subtype="PCM_16")
+            filename = f"{label}_{index:03d}.wav"
+            sf.write(label_dir / filename, window, config.SAMPLE_RATE,
+                      subtype="PCM_16")
+            groups[filename] = gid
             index += 1
+        save_groups(label_dir, groups)  # after each sentence: Ctrl-C safe
         print(f"      saved {len(windows)} clips  {describe(samples, label)}"
               + " " * 10)
 

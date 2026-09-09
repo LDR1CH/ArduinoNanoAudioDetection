@@ -27,6 +27,16 @@ TFLITE_PATH = TFLITE_DIR / "ds_cnn_int8.tflite"
 # the index firmware/model_settings.h must agree on. Background noise is a
 # real class, always index 0, so the model has a rejection option.
 BACKGROUND_LABEL = "_background_noise"
+
+# Sidecar written by record_samples.py --sentences (data/raw/_background_noise/
+# _groups.json): maps clip filename -> a group id shared by every window
+# sliced from the same sentence reading. extract_features.py keeps a group
+# together on one side of the train/val/test split -- overlapping windows
+# from one reading share most of their audio, so splitting them apart would
+# leak train-set content into val/test and inflate those scores. A clip
+# absent from the sidecar (every ambient clip, and every keyword clip) is
+# its own singleton group.
+BACKGROUND_GROUPS_FILENAME = "_groups.json"
 KEYWORDS = ["music", "play", "pause", "skip"]
 LABELS = [BACKGROUND_LABEL] + KEYWORDS
 NUM_CLASSES = len(LABELS)
@@ -53,9 +63,21 @@ SENTENCES_PATH = REPO_ROOT / "docs" / "test_sentences.md"
 # --- MFCC features -------------------------------------------------------
 # The (NUM_FRAMES, NUM_MFCC) array here is the model's input shape and is
 # what feature_provider must produce on-device.
+#
+# Framing is non-centered (no reflect-padding at the clip edges): frame i
+# starts at sample i * WINDOW_STRIDE_SAMPLES, and the window is exactly
+# WINDOW_SIZE_SAMPLES long with no zero-padding inside the FFT. That is what
+# makes the NUM_FRAMES formula below exact: with CLIP_SAMPLES=16000,
+# WINDOW_SIZE_SAMPLES=640, WINDOW_STRIDE_SAMPLES=320, the 49th frame's last
+# sample is exactly the clip's last sample, with nothing dropped or padded.
+# feature_provider.cpp must frame the same way, or the two feature sets
+# disagree about what "frame 0" even is.
 WINDOW_SIZE_MS = 40
 WINDOW_STRIDE_MS = 20
-NUM_MFCC = 10
+WINDOW_SIZE_SAMPLES = SAMPLE_RATE * WINDOW_SIZE_MS // 1000
+WINDOW_STRIDE_SAMPLES = SAMPLE_RATE * WINDOW_STRIDE_MS // 1000
+N_MELS = 40                  # mel filterbank channels before DCT truncation
+NUM_MFCC = 10                # coefficients kept after the DCT
 NUM_FRAMES = 1 + (CLIP_DURATION_MS - WINDOW_SIZE_MS) // WINDOW_STRIDE_MS  # 49
 FEATURE_SHAPE = (NUM_FRAMES, NUM_MFCC)
 
