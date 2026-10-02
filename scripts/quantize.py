@@ -14,7 +14,7 @@ checkpoint and the date in the commit message.
 
 INT8 rather than float32: the Cortex-M4F has an FPU, but int8 ops are still
 smaller and faster, and the model needs to fit comfortably alongside the rest
-of the sketch (see CLAUDE.md). If accuracy drops unacceptably after
+of the sketch. If accuracy drops unacceptably after
 quantization -- this script checks and prints exactly that -- try
 quantization-aware training before reverting to float32.
 
@@ -100,7 +100,7 @@ def check_accuracy(tflite_bytes):
 
     Not a substitute for evaluate.py's full confusion matrix -- just an
     immediate, impossible-to-miss signal if quantization tanked accuracy,
-    per the tradeoff CLAUDE.md calls out explicitly for this exact step.
+    per the int8-vs-float32 tradeoff described at the top of this file.
     """
     mean, std = load_normalization()
     x_val, y_val = _load_normalized_split("val", mean, std)
@@ -131,8 +131,8 @@ def check_accuracy(tflite_bytes):
     drop = keras_acc - tflite_acc
     if drop > 0.05:
         print(f"WARNING: int8 quantization cost {drop:.4f} accuracy "
-              f"(> 0.05). Consider quantization-aware training (see "
-              f"CLAUDE.md) before flashing this model.")
+              f"(> 0.05). Consider quantization-aware training before "
+              f"flashing this model.")
     return tflite_acc
 
 
