@@ -110,6 +110,10 @@ almost nothing across the resistor on a 3.3 V board, so they barely light.
 
 ## Results
 
+**[Watch the demo on YouTube](https://youtube.com/shorts/fUrOOJIeVOo)** — the
+spotter running live on the board.
+
 `scripts/evaluate.py` writes a confusion matrix and per-class accuracy into
 `results/`. The model reached roughly 98% validation accuracy on ~500 clips —
-a small dataset, so a promising figure rather than a robust one.
+a small dataset, so a promising figure rather than a robust one. More in
+[results/README.md](results/README.md).
