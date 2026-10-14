@@ -1,8 +1,8 @@
 # KeywordSpotter
 
-A spoken-keyword detector that runs entirely on an Arduino Nano 33 BLE Sense —
-no network, no phone, no cloud. It listens through the board's built-in
-microphone, recognises four command words, and lights an LED when it hears one.
+A spoken-keyword detector that runs entirely on an Arduino Nano 33 BLE Sense.
+It listens through the board's built-in microphone, recognises four 
+command words, and lights an LED when it hears one.
 
 ```
 music    play    pause    skip    (+ background noise)
@@ -19,9 +19,7 @@ record clips  ->  convert to features  ->  train the model  ->  flash to board
     (PC)                 (PC)                    (PC)             (board)
 ```
 
-Each one-second clip is summarised as **MFCCs** — a compact description of which
-frequencies are present over time, much smaller than raw audio and easier to
-learn from. The model is a small convolutional network, compressed to 8-bit
+Each one-second clip is summarised as **MFCCs** The model is a small convolutional network, compressed to 8-bit
 whole numbers so it fits in the chip's limited memory, and runs through
 TensorFlow Lite for Microcontrollers at roughly two predictions per second.
 
@@ -55,8 +53,7 @@ python scripts/evaluate.py            # accuracy and confusion matrix
 python scripts/quantize.py            # compress, and generate the firmware files
 ```
 
-`scripts/config.py` holds every path, label and setting — change things there
-rather than in the individual scripts.
+`scripts/config.py` contains all constants and important file information.
 
 **`train.py` and `quantize.py` need TensorFlow, which has no release for Python
 3.14 yet.** Use Python 3.11 or 3.12 for those two steps; a separate conda
@@ -110,10 +107,8 @@ almost nothing across the resistor on a 3.3 V board, so they barely light.
 
 ## Results
 
-**[Watch the demo on YouTube](https://youtube.com/shorts/fUrOOJIeVOo)** — the
-spotter running live on the board.
+**[Watch the demo on YouTube](https://youtube.com/shorts/fUrOOJIeVOo)**
 
 `scripts/evaluate.py` writes a confusion matrix and per-class accuracy into
-`results/`. The model reached roughly 98% validation accuracy on ~500 clips —
-a small dataset, so a promising figure rather than a robust one. More in
+`results/`. The model reached roughly 98% validation accuracy on ~500 clips. More in
 [results/README.md](results/README.md).
